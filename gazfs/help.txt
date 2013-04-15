@@ -1,0 +1,13 @@
+GazOS Helpfile
+--------------
+
+There is currently only two commands that you can use on the command line
+and these are:
+
+ls		- Gives you a directory listing
+cat <filename>	- Displays the contents of <filename>
+
+---------------------------------------------------------
+Gareth Owen
+gaz@athene.co.uk
+http://members.xoom.com/gaztek

@@ -1,0 +1,5 @@
+#!/bin/sh
+rm bootsec
+/usr/local/bin/nasm bootsec.asm -o bootsec
+cat ../kernel.elf >>bootsec
+dd if=bootsec of=/dev/fd0

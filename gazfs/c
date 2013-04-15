@@ -1,0 +1,2 @@
+#!/bin/sh
+gcc format.c -o format
