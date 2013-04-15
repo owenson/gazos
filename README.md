@@ -42,4 +42,3 @@ would be grateful if you would tell me too, just so I know about it.
 Thanks
 Gareth
 
-Email me at: gaz@athene.co.uk

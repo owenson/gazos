@@ -24,5 +24,3 @@ If you need some sort of information the visit my website or e-mail me.
 
 --------------
 Gareth Owen
-gaz@athene.co.uk
-http://members.xoom.com/gaztek

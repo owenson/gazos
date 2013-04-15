@@ -9,5 +9,3 @@ cat <filename>	- Displays the contents of <filename>
 
 ---------------------------------------------------------
 Gareth Owen
-gaz@athene.co.uk
-http://members.xoom.com/gaztek
