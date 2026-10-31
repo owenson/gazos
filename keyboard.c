@@ -1,6 +1,6 @@
 /*
 GazOS Operating System
-Copyright (C) 1999  Gareth Owen <gaz@athene.co.uk>
+Copyright (C) 1999  Gareth Owenson <gareth.owenson@gmail.com>
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -33,9 +33,9 @@ void ulong_strcnv();
 unsigned char led_status = 0;
 
 /* keyboard_buffer stores every key typed */
-unsigned char keyboard_buffer[255];
+volatile unsigned char keyboard_buffer[255];
 /* keyboard_buffer_size stores the number of keys in the buffer */
-unsigned char keyboard_buffer_size = 0;
+volatile unsigned char keyboard_buffer_size = 0;
 
 unsigned char control_keys = 0;
 
@@ -175,8 +175,46 @@ void setleds()
 	while(inportb(0x64) & 2);
 }
 
+/* Wait until the 8042 controller can take a byte / has a byte for us */
+static void kbc_wait_write(void)
+{
+	unsigned long t;
+	for(t = 0; t < 100000 && (inportb(0x64) & 2); t++);
+}
+
+static int kbc_wait_read(void)
+{
+	unsigned long t;
+	for(t = 0; t < 100000; t++)
+		if(inportb(0x64) & 1)
+			return 1;
+	return 0;
+}
+
 void InitKeyboard()
 {
+	unsigned char cb;
+
+	/* The firmware (e.g. a UEFI PS/2 driver, which polls) may have left
+	 * keyboard interrupts disabled in the 8042 command byte. Turn on
+	 * IRQ1 and scancode translation, and enable the keyboard port. */
+	while(inportb(0x64) & 1)		/* flush stale bytes */
+		inportb(0x60);
+	kbc_wait_write();
+	outportb(0x64, 0x20);			/* read command byte */
+	if(kbc_wait_read())
+	{
+		cb = inportb(0x60);
+		cb |= 0x01 | 0x40;		/* IRQ1 on, translation on */
+		cb &= ~0x10;			/* keyboard clock enabled */
+		kbc_wait_write();
+		outportb(0x64, 0x60);		/* write command byte */
+		kbc_wait_write();
+		outportb(0x60, cb);
+	}
+	kbc_wait_write();
+	outportb(0x64, 0xAE);			/* enable keyboard port */
+
 	set_vector(keyb_ISR, M_VEC+1, D_PRESENT + D_INT + D_DPL3); /* IRQ1 Handler */
 	enable_irq(1);
 
@@ -224,12 +262,15 @@ void keyb_handler(void)
 		control_keys |= CK_SHIFT;
 	if((key == 0x80 + 0x2A) || (key == 0x80 + 0x36))	/* Shift key depressed */
 		control_keys &= (0xFF - CK_SHIFT);
-	if(key == 0x38 && (!control_keys & CK_ALT))
+	if(key == 0x38 && !(control_keys & CK_ALT))
 		control_keys |= CK_ALT;
 	if(key == 0x80 + 0x38)
 		control_keys &= (0xFF - CK_ALT);
 		
-	if((control_keys & CK_SHIFT) && (led_status & LED_CAPS_LOCK)) key_ascii = scan2ascii_table[key][6]; 
+	/* Key releases (bit 7 set), 0xE0/0xE1 prefixes and scancodes past the
+	 * end of the table produce no character */
+	if(key >= sizeof(scan2ascii_table) / sizeof(scan2ascii_table[0])) key_ascii = 0;
+	else if((control_keys & CK_SHIFT) && (led_status & LED_CAPS_LOCK)) key_ascii = scan2ascii_table[key][6]; 
 	else if(control_keys & CK_SHIFT) key_ascii = scan2ascii_table[key][1];
 	else if(control_keys & CK_CTRL) key_ascii = scan2ascii_table[key][2];
 	else if(control_keys & CK_ALT) key_ascii = scan2ascii_table[key][3];	
@@ -238,7 +279,7 @@ void keyb_handler(void)
 	else if(led_status & LED_NUM_LOCK) key_ascii = scan2ascii_table[key][4];
 	else if(control_keys == 0) key_ascii = scan2ascii_table[key][0];
 
-	if(key_ascii != 0)
+	if(key_ascii != 0 && keyboard_buffer_size < 253)	/* drop keys when full */
 	{
 		if(key_ascii <= 0xFF)
 		{
@@ -263,11 +304,15 @@ unsigned char getch()
 	
 	while(keyboard_buffer_size == 0);
 	
+	/* The keyboard ISR appends to the buffer, so don't let it run
+	 * while we remove the first key and shift the rest down */
+	asm volatile ("pushf; cli" ::: "memory");
 	ret_key = keyboard_buffer[0];
 	keyboard_buffer_size--;
 	
-	for(loop=0; loop<254; loop++)
+	for(loop=0; loop<keyboard_buffer_size; loop++)
 		keyboard_buffer[loop] = keyboard_buffer[loop+1];
+	asm volatile ("popf" ::: "memory");
 	
 	return ret_key;
 }

@@ -1,0 +1,19 @@
+GazOS Helpfile
+--------------
+
+GazOS boots from a SATA (AHCI) disk and reads files from a FAT32
+partition. Commands:
+
+ls [path]      - Gives you a directory listing
+cat <file>     - Displays the contents of <file>
+cd [path]      - Change directory ("cd" alone goes to /)
+pwd            - Print the current directory
+disk           - Show disk and filesystem information
+cls            - Clear the screen
+reboot         - Restart the computer
+
+Paths can be absolute (/docs/notes.txt) or relative (../readme.txt).
+Long file names are supported, and names are not case sensitive.
+
+---------------------------------------------------------
+Gareth Owenson

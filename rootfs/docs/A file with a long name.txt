@@ -1,0 +1,2 @@
+This file lives in /docs and has a long (VFAT) file name.
+If you can read this, LFN support works.

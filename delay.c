@@ -15,7 +15,7 @@
  */
 /*
 GazOS Operating System
-Copyright (C) 1999  Gareth Owen <gaz@athene.co.uk>
+Copyright (C) 1999  Gareth Owenson <gareth.owenson@gmail.com>
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -107,7 +107,7 @@ static unsigned long delay_count = 1;
 
 void __delay(loops)
 {
-    unsigned long c;
+    volatile unsigned long c;
     for(c=0;c<loops;c++);
 }
 
