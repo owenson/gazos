@@ -25,5 +25,8 @@ void keyb_handler();
 void setleds();
 unsigned char getch();
 unsigned char kbhit();
+void keyboard_put(unsigned char c);	/* queue a key (used by the USB driver) */
+extern int ps2_present;			/* is there an 8042 PS/2 controller? */
+void _exit(void);			/* reboot the machine (kernel.c) */
 
 #endif

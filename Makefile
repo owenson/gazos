@@ -28,7 +28,7 @@ NASM    = nasm
 
 # The object files belonging to the kernel
 OBJS = idt.o kernel.o io.o video.o 8259.o keyboard.o pit.o delay.o string.o \
-       math.o mem.o serial.o font8x16.o pci.o ahci.o fat32.o
+       math.o mem.o serial.o font8x16.o pci.o ahci.o fat32.o paging.o xhci.o
 
 KERNELFN = kernel.elf
 BOOT     = boot/mbr.bin boot/vbr.bin boot/stage2.bin

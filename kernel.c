@@ -22,6 +22,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "fat32.h"
 #include "serial.h"
 #include "bootinfo.h"
+#include "usb.h"
 #include "video.h"
 #include "gdt.h"
 #include "idt.h"
@@ -319,6 +320,10 @@ void main()
 	if(ahci_init())
 		disk_ok = fat32_mount();
 
+	usb_init();
+	if(!ps2_present && !usb_keyboard_present)
+		kprint("WARNING: no keyboard found (PS/2 or USB)\n");
+
 	kprint("CPU = ");
 	printlong(cpuspeed);
 	kprint("Mhz  -  Mem.Total = ");
@@ -362,12 +367,26 @@ void main()
 	}
 }
 
-void _exit(void)			/* Exit point of the kernel	*/
+void _exit(void)			/* Reboot the computer		*/
 {
-   while(inportb(0x64) & 0x02);		/* Reboot the computer		*/
-   outportb(0x64, 0xfe);
+   unsigned long t;
+   struct { unsigned short limit; unsigned long base; } __attribute__ ((packed))
+      no_idt = { 0, 0 };
 
-   asm("cli;hlt");			/* Should it not work we halt 	*/
-					/* the computer now so the we	*/
-					/* do no harm			*/
+   asm volatile ("cli");
+
+   if(ps2_present)			/* 1. pulse reset via the 8042	*/
+   {
+      for(t = 0; t < 100000 && (inportb(0x64) & 0x02); t++);
+      outportb(0x64, 0xFE);
+      delay(50);
+   }
+
+   outportb(0xCF9, 0x02);		/* 2. PCI reset control register */
+   outportb(0xCF9, 0x06);		/*    (hard reset)		*/
+   delay(50);
+
+   asm volatile ("lidt %0; int3" : : "m" (no_idt));	/* 3. triple fault */
+   for(;;)
+      asm volatile ("hlt");
 }
