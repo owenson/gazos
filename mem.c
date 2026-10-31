@@ -1,6 +1,6 @@
 /*
 GazOS Operating System
-Copyright (C) 1999  Gareth Owen <gaz@athene.co.uk>
+Copyright (C) 1999  Gareth Owenson <gareth.owenson@gmail.com>
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -41,7 +41,7 @@ void count_memory(void)
          memkb=0;
 
          // store a copy of CR0
-         __asm__ __volatile("movl %%cr0, %%eax":"=a"(cr0)::"eax");
+         __asm__ __volatile("movl %%cr0, %%eax":"=a"(cr0));
 
          // invalidate the cache
          // write-back and invalidate the cache
@@ -49,7 +49,7 @@ void count_memory(void)
 
          // plug cr0 with just PE/CD/NW
          // cache disable(486+), no-writeback(486+), 32bit mode(386+)
-         __asm__ __volatile__("movl %%eax, %%cr0" :: "a" (cr0 | 0x00000001 | 0x40000000 | 0x20000000) : "eax");
+         __asm__ __volatile__("movl %%eax, %%cr0" :: "a" (cr0 | 0x00000001 | 0x40000000 | 0x20000000));
 
          do
          {
@@ -78,7 +78,7 @@ void count_memory(void)
                  *mem=a;
          }while(memkb<4096 && mem_count!=0);
 
-         __asm__ __volatile__("movl %%eax, %%cr0" :: "a" (cr0) : "eax");
+         __asm__ __volatile__("movl %%eax, %%cr0" :: "a" (cr0));
 
          mem_end=memkb<<20;
          mem=(unsigned long *)0x413;

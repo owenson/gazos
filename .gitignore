@@ -1,0 +1,7 @@
+*.o
+*.bin
+*.EFI
+kernel.elf
+disk.img
+disk.img.part
+ovmf_vars.fd

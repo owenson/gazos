@@ -23,4 +23,4 @@ and well, then I'll start thinking about the GUI and hard disk support.
 If you need some sort of information the visit my website or e-mail me.
 
 --------------
-Gareth Owen
+Gareth Owenson

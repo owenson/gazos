@@ -1,6 +1,6 @@
 /*
 GazOS Operating System
-Copyright (C) 1999  Gareth Owen <gaz@athene.co.uk>
+Copyright (C) 1999  Gareth Owenson <gareth.owenson@gmail.com>
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -64,6 +64,5 @@ asm (
 
 void pit_handler()
 {
-	asm("int $0x1C");	// Extra timer interrupt, used by floppy for timeout etc..	
 	outportb(0x20, 0x20);
 }
