@@ -4,6 +4,9 @@
 #
 #   ./run.sh              boot via UEFI (OVMF firmware) - the default
 #   ./run.sh --bios       boot via legacy BIOS (SeaBIOS) instead
+#   ./run.sh --keyboard usb   USB keyboard only, no PS/2 controller
+#   ./run.sh --keyboard ps2   PS/2 keyboard only, no USB
+#                         (default: both, like most PCs)
 #   ./run.sh --snapshot   don't write any changes back to disk.img
 #   ./run.sh --serial     also print the kernel's serial console here
 #   ./run.sh --gdb        wait for gdb on :1234 before starting the CPU
@@ -20,6 +23,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--bios)     MODE=bios ;;
 	--uefi)     MODE=uefi ;;
+	--keyboard) shift; KEYBOARD=$1; export KEYBOARD ;;
 	--snapshot) EXTRA="$EXTRA -snapshot" ;;
 	--serial)   EXTRA="$EXTRA -serial stdio" ;;
 	--gdb)      EXTRA="$EXTRA -s -S"

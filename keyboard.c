@@ -18,6 +18,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 */
 
 #include "keyboard.h"
+#include "usb.h"
 #include "io.h"
 #include "video.h"
 #include "idt.h"
@@ -167,19 +168,23 @@ asm (
    "   iret                \n" /* Exit interrupt                   */
 );
 
-void setleds()
-{
-	outportb(0x60, 0xED);
-	while(inportb(0x64) & 2);
-	outportb(0x60, led_status);
-	while(inportb(0x64) & 2);
-}
-
 /* Wait until the 8042 controller can take a byte / has a byte for us */
 static void kbc_wait_write(void)
 {
 	unsigned long t;
 	for(t = 0; t < 100000 && (inportb(0x64) & 2); t++);
+}
+
+int ps2_present = 0;
+
+void setleds()
+{
+	if(!ps2_present)
+		return;
+	outportb(0x60, 0xED);
+	kbc_wait_write();
+	outportb(0x60, led_status);
+	kbc_wait_write();
 }
 
 static int kbc_wait_read(void)
@@ -194,11 +199,21 @@ static int kbc_wait_read(void)
 void InitKeyboard()
 {
 	unsigned char cb;
+	unsigned int n;
+
+	/* No 8042 at all (common on new PCs, or QEMU with i8042=off): the
+	 * status port floats high. Don't touch it; USB may provide a keyboard. */
+	if(inportb(0x64) == 0xFF)
+	{
+		kprint("No PS/2 controller\n");
+		return;
+	}
+	ps2_present = 1;
 
 	/* The firmware (e.g. a UEFI PS/2 driver, which polls) may have left
 	 * keyboard interrupts disabled in the 8042 command byte. Turn on
 	 * IRQ1 and scancode translation, and enable the keyboard port. */
-	while(inportb(0x64) & 1)		/* flush stale bytes */
+	for(n = 0; n < 32 && (inportb(0x64) & 1); n++)	/* flush stale bytes */
 		inportb(0x60);
 	kbc_wait_write();
 	outportb(0x64, 0x20);			/* read command byte */
@@ -228,13 +243,7 @@ void keyb_handler(void)
 	unsigned int key_ascii = 0;
 	
 	if((control_keys & (CK_CTRL+CK_ALT)) && key==0x53)
-	{
-		while(inportb(0x64) & 2);
-		
-		outportb(0x64, 0xFE);
-		
-		asm ("cli;hlt");
-	}		
+		_exit();			/* Ctrl+Alt+Del: reboot */
 	
 	/* 'LED Keys', ie, Scroll lock, Num lock, and Caps lock */
 	if(key == 0x3A)	/* Caps Lock */
@@ -302,7 +311,8 @@ unsigned char getch()
 	unsigned char ret_key=0;
 	unsigned int loop=0;
 	
-	while(keyboard_buffer_size == 0);
+	while(keyboard_buffer_size == 0)	/* PS/2 keys arrive by IRQ 1; */
+		usb_poll();			/* USB keys are polled for */
 	
 	/* The keyboard ISR appends to the buffer, so don't let it run
 	 * while we remove the first key and shift the rest down */
@@ -317,8 +327,18 @@ unsigned char getch()
 	return ret_key;
 }
 
+/* Add a key to the buffer (the USB keyboard driver calls this). */
+void keyboard_put(unsigned char c)
+{
+	asm volatile ("pushf; cli" ::: "memory");	/* the IRQ 1 handler appends too */
+	if(keyboard_buffer_size < 253)
+		keyboard_buffer[keyboard_buffer_size++] = c;
+	asm volatile ("popf" ::: "memory");
+}
+
 unsigned char kbhit()
 {
+	usb_poll();
 	if(keyboard_buffer_size == 0) return 0;
 	
 	return 1;

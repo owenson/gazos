@@ -12,10 +12,13 @@ Quick start
     ./run.sh --bios ... or via legacy BIOS
     ./test.sh       build, then run the end-to-end tests via UEFI and BIOS
 
+./run.sh --keyboard usb gives the VM only a USB keyboard (no PS/2
+controller), --keyboard ps2 only a PS/2 one; the default is both.
 ./run.sh --serial also prints the serial console in your terminal,
 --snapshot leaves disk.img unchanged, and --gdb waits for a debugger.
-./test.sh --headless runs the tests without a QEMU window, and
---firmware uefi (or bios) tests one boot mode.
+./test.sh runs every firmware (UEFI, BIOS) x keyboard (USB, PS/2)
+combination; --firmware and --keyboard pick one, and --headless runs
+without a QEMU window.
 
 Requirements
 ------------
@@ -43,7 +46,8 @@ from 64-bit long mode to 32-bit protected mode to start the kernel.
 Under a BIOS, the MBR chain-loads the partition's boot sector, which
 loads stage 2 from the reserved sectors. Stage 2 reads KERNEL.ELF from
 FAT32 itself and switches to protected mode. Either way the same 32-bit
-kernel starts, and then uses its own PCI, AHCI (SATA) and FAT32 drivers.
+kernel starts, and then uses its own PCI, AHCI (SATA), FAT32 and USB
+(xHCI + HID keyboard) drivers. PS/2 and USB keyboards both work.
 Its console is VGA text mode, or a framebuffer text console under UEFI.
 
 See docs/ARCHITECTURE.md for the full details: both boot sequences step
@@ -56,8 +60,9 @@ cat/type, cd, pwd, disk, cls, reboot, help.
 
 To boot real hardware, write disk.img to a disk with dd (this destroys
 what is on that disk) and set the SATA controller to AHCI mode. Under
-UEFI, turn Secure Boot off (the loader is not signed). The keyboard
-driver is PS/2 only; see the limitations in docs/ARCHITECTURE.md.
+UEFI, turn Secure Boot off (the loader is not signed). USB keyboards
+must be plugged directly into an xHCI (USB 3) root port, not a hub; see
+the limitations in docs/ARCHITECTURE.md.
 
 If you modify the code in anyway, I would appreciate it if you would share
 your modifications with me, and perhaps I will include them in the next

@@ -2,8 +2,8 @@
 
 GazOS is a small 32-bit x86 operating system. It boots via UEFI (the
 default) or a legacy BIOS from the same disk image, finds a SATA disk
-through the AHCI controller, mounts a FAT32 filesystem and runs a command
-shell. This document explains how the
+through the AHCI controller, mounts a FAT32 filesystem, and runs a command
+shell that takes input from a PS/2 or USB keyboard. This document explains how the
 pieces fit together, from power-on to the shell prompt.
 
 - [Overview](#overview)
@@ -44,9 +44,12 @@ protected mode with paging off. The UEFI loader also passes a small
 memory size). After that the firmware isn't used, so the kernel has its
 own PCI, AHCI and FAT32 drivers.
 
-Everything runs in ring 0 with flat 4 GB segments and **paging disabled**,
-so linear addresses are physical addresses. The AHCI driver depends on
-this: it gives kernel buffer addresses directly to the controller for DMA.
+Everything runs in ring 0 with flat 4 GB segments. Paging is **off**
+unless a device's registers are above 4 GB, in which case PAE paging is
+turned on with the low 4 GB identity-mapped (see [Paging](#paging)).
+Either way, kernel addresses are physical addresses. The AHCI and xHCI
+drivers depend on this: they give kernel buffer addresses directly to
+the controller for DMA.
 
 ## Source tree
 
@@ -64,7 +67,9 @@ this: it gives kernel buffer addresses directly to the controller for DMA.
 | `8259.c` `8259.h`    | Programmable interrupt controller (IRQ remapping, masks) |
 | `pit.c` `pit.h`      | Programmable interval timer (IRQ 0)                     |
 | `delay.c` `delay.h`  | Busy-wait delay loop, calibrated against the PIT        |
-| `keyboard.c`         | PS/2 keyboard driver (IRQ 1), scancode to ASCII         |
+| `keyboard.c`         | PS/2 keyboard driver (IRQ 1), scancode to ASCII; the key buffer shared with USB |
+| `xhci.c` `usb.h`     | xHCI USB host controller driver and USB HID boot keyboard driver |
+| `paging.c` `paging.h` | PAE paging, turned on only to reach device memory above 4 GB |
 | `video.c` `video.h`  | Console (`kprint`, `printlong`, `cls`): VGA text mode, or a framebuffer text console under UEFI |
 | `font8x16.c`         | 8×16 font for the framebuffer console (generated)       |
 | `serial.c`           | COM1 serial console; copies all console output to COM1  |
@@ -338,10 +343,11 @@ memory itself.
 | 3    | `InitIDT`             | 256-entry IDT: CPU exception handlers, a default `iret` handler for everything else; `lidt`; `sti` |
 | 4    | `calibrateDelayLoop`  | Runs the PIT at 100 Hz and finds how many loop iterations fit in one tick (gives `delay()` and the CPU MHz estimate) |
 | 5    | memory size           | UEFI: `boot_info->mem_bytes`. BIOS: `count_memory` probes RAM 1 MB at a time with the cache disabled |
-| 6    | `InitKeyboard`        | Enables IRQ 1 in the 8042 controller; keyboard ISR on vector `0x69`; LEDs off |
+| 6    | `InitKeyboard`        | If there is an 8042 controller: enables IRQ 1 in it; keyboard ISR on vector `0x69`; LEDs off |
 | 7    | `init_pit`            | PIT channel 0 at 18.2 Hz on IRQ 0 (vector `0x68`)   |
 | 8    | `ahci_init`           | Finds the AHCI controller and first SATA disk       |
 | 9    | `fat32_mount`         | Finds the FAT32 partition and reads the BPB         |
+| 9a   | `usb_init`            | Finds the xHCI controller and sets up a USB keyboard if one is plugged in |
 | 10   | shell loop            | `GazOS] /: ` prompt                                 |
 
 ## Memory map
@@ -374,6 +380,10 @@ While the kernel runs (protected mode, no paging):
 | boot info page      | `struct boot_info` (UEFI boots; anywhere below 4 GB) |
 | GOP framebuffer (e.g. `0x80000000`) | Framebuffer, UEFI boots          |
 | PCI BAR5 (e.g. `0xFEBxxxxx`) | AHCI registers (MMIO)                   |
+| `0xFF800000–0xFFFFFFFF` | Paging on only: window onto device memory above 4 GB (e.g. xHCI registers) |
+
+The xHCI driver's DMA structures (rings, contexts, scratchpad pages, about
+200 KB) are in `.bss`.
 
 Run `size kernel.elf` or `nm -n kernel.elf` for the current addresses.
 
@@ -422,11 +432,45 @@ Shift/Ctrl/Alt and the lock LEDs, converts the scancode to ASCII with
 interrupts disabled. The buffer is shared with the ISR, so it is
 `volatile`. Ctrl+Alt+Del resets the machine via the keyboard controller.
 
-`InitKeyboard` first sets up the 8042 controller itself: it flushes stale
-bytes, sets the "IRQ 1 enable" and "translate to set 1" bits in the
-command byte, and enables the keyboard port. A UEFI PS/2 driver usually
-polls with keyboard interrupts disabled. A BIOS normally leaves them on,
-but setting them is harmless either way.
+`InitKeyboard` first checks there is an 8042 controller at all. Many
+new PCs have none, and then port `0x64` reads `0xFF`. In that case it
+leaves the PS/2 code switched off, so no code waits on a controller that
+will never answer. Otherwise it sets up the 8042: it flushes stale bytes,
+sets the "IRQ 1 enable" and "translate to set 1" bits in the command
+byte, and enables the keyboard port. A UEFI PS/2 driver usually polls
+with keyboard interrupts disabled. A BIOS normally leaves them on, but
+setting them is harmless either way.
+
+**USB keyboards** feed the same buffer through `keyboard_put()`. USB has
+no keyboard IRQ here, so `getch()` calls `usb_poll()` while it waits; see
+[xHCI](#xhci--usb-keyboard-xhcic). Everything above `getch()` (the shell,
+`gets()`, the pager) doesn't know which keyboard a key came from.
+
+**Rebooting** (`reboot`, Ctrl+Alt+Del on either keyboard) tries, in order:
+the 8042 reset line (if present), the PCI reset control register
+(`0xCF9`), and a triple fault (an empty IDT plus `int3`).
+
+### Paging
+
+`map_device(phys, size)` (`paging.c`) returns a pointer to device memory.
+Below 4 GB that's just the physical address. UEFI firmware often places
+64-bit PCI BARs above 4 GB (OVMF does this with the xHCI controller), and
+a 32-bit kernel can't reach those with paging off. The first time that
+happens, `map_device` turns on **PAE paging**:
+
+- One PDPT and four page directories of 2 MB pages identity-map all 4 GB,
+  so every existing pointer and DMA address stays valid. These pages use
+  normal caching, so the firmware's MTRRs still decide the memory type,
+  and device memory such as the framebuffer and AHCI registers stays
+  uncached.
+- The top 8 MB (`0xFF800000` up, normally firmware flash, which the
+  kernel never touches) is a window for device memory above 4 GB. Pages
+  there are remapped to the device's 64-bit physical address with
+  caching disabled (PCD and PWT).
+
+PAE page table entries are 64-bit, so they can point above 4 GB while
+the kernel stays 32-bit. Machines whose devices are all below 4 GB never
+turn paging on.
 
 ## Drivers
 
@@ -466,6 +510,71 @@ It checks `PxIS.TFES` and `PxTFD.ERR` for errors and gives up after a
 fixed number of polls. `ahci_read`/`ahci_write` transfer up to 128
 sectors per call into any 2-byte-aligned buffer. This works because
 kernel addresses are physical addresses.
+
+### xHCI / USB keyboard (`xhci.c`)
+
+Supports the first xHCI (USB 3) controller, devices plugged straight
+into its root ports (no hubs), and the first keyboard, which it drives in
+the HID **boot protocol**. Every USB keyboard supports this fixed 8-byte
+report so BIOSes can use it. Everything is polled.
+
+**Controller setup.**
+
+1. Finds PCI class `0C`/`03`/`30`, enables memory decoding and bus
+   mastering, and maps BAR0 with `map_device` (it may be 64-bit and
+   above 4 GB).
+2. **Firmware hand-off:** finds the USB Legacy Support extended
+   capability, sets the "OS owned" semaphore, waits for the "BIOS owned"
+   bit to clear, and turns off its SMIs. This stops the firmware from
+   emulating a PS/2 keyboard and from touching the controller.
+3. Stops and resets the controller (`HCRST`, then waits for `CNR` to clear).
+4. Sets up its data structures:
+   - **DCBAA:** the Device Context Base Address Array. Entry 0 points to
+     scratchpad pages if the controller asks for them (up to 32 here).
+   - **Command ring:** 64 TRBs ending in a Link TRB back to the start
+     (`CRCR`, cycle state 1).
+   - **Event ring:** one 64-TRB segment described by a one-entry ERST on
+     interrupter 0. Interrupts stay off.
+5. Sets `USBCMD.RS` to run, and waits 100 ms for devices to connect.
+
+**Rings.** A ring is an array of 16-byte TRBs (Transfer Request Blocks).
+The cycle bit says who owns each TRB. `ring_push()` writes the TRB, then
+its cycle bit last; at the Link TRB it flips the cycle state.
+`poll_events()` consumes event TRBs while their cycle bit matches,
+dispatches them, and writes the new dequeue pointer to `ERDP`.
+
+**Enumeration**, for each connected root port:
+
+1. A USB 2 port is reset (`PR`, then wait for `PRC`). USB 3 ports enable
+   themselves when the link comes up.
+2. **Enable Slot** command gives a slot ID. The slot's output device
+   context goes into the DCBAA.
+3. **Address Device** with an input context: the slot context (speed,
+   root port number) and the EP0 context (control endpoint, transfer
+   ring, max packet size guessed from the speed).
+4. **GET_DESCRIPTOR(device)**, first 8 bytes, gives EP0's real max packet
+   size. If the guess was wrong, **Evaluate Context** fixes it.
+5. **GET_DESCRIPTOR(configuration)**: looks for an interface of class 3
+   (HID), subclass 1 (boot) and protocol 1 (keyboard), and its interrupt
+   IN endpoint.
+6. **SET_CONFIGURATION**, **SET_PROTOCOL(boot)**, then **SET_IDLE(0)** so
+   the keyboard only reports when something changes.
+7. **Configure Endpoint** adds the interrupt IN endpoint, with its xHCI
+   interval: an exponent of 125 µs, converted from `bInterval`.
+8. Queues a Normal TRB for an 8-byte report and rings the endpoint's
+   doorbell.
+
+Control transfers are three TRBs on EP0: a Setup stage with the 8-byte
+request inside the TRB, an optional Data stage, and a Status stage that
+generates the completion event.
+
+**Reports.** Each completed report is
+`[modifiers, reserved, key1..key6]`, where the keys are HID usage IDs of
+the keys currently held. A key is *newly pressed* if it wasn't in the
+previous report. The driver translates new presses to ASCII (US layout,
+Shift, Caps Lock, Ctrl+letter, keypad) and passes them to
+`keyboard_put()`, then queues the next report. A report with
+`0x01` in the key slots means too many keys were pressed, and is ignored.
 
 ### FAT32 (`fat32.c`)
 
@@ -526,21 +635,29 @@ word as the command:
 | `./build.sh`             | Checks build tools are installed, then runs `make` (`./build.sh clean` rebuilds from scratch) |
 | `./run.sh`               | Builds and boots `disk.img` via UEFI in a QEMU window  |
 | `./run.sh --bios`        | Same, via legacy BIOS                                  |
+| `./run.sh --keyboard usb` | USB keyboard only: no PS/2 controller (`ps2`: no USB; default `both`) |
 | `./run.sh --serial`      | Also shows the serial console in the terminal          |
 | `./run.sh --snapshot`    | Doesn't write anything back to `disk.img`              |
 | `./run.sh --gdb`         | Starts QEMU paused, waiting for gdb on port 1234       |
-| `./test.sh`              | Runs the end-to-end tests via UEFI, then via BIOS      |
-| `./test.sh --firmware uefi` | Tests one boot mode only (`uefi` or `bios`)         |
+| `./test.sh`              | Runs the end-to-end tests for each firmware (UEFI, BIOS) × keyboard (USB, PS/2) |
+| `./test.sh --firmware uefi --keyboard usb` | Tests one combination           |
 | `./test.sh --headless`   | Same, with no window (CI)                              |
 
-**End-to-end tests (`tools/test.py`).** The whole suite runs once per
-boot mode. QEMU runs with `-snapshot`, so `disk.img` is never modified. The serial console goes to a log file and
+**End-to-end tests (`tools/test.py`).** The whole suite runs four times:
+UEFI or BIOS, each with a USB-only machine (xHCI and `usb-kbd`, with the
+8042 removed via `i8042=off`, so every keystroke has to come over USB)
+and with a PS/2-only machine (no USB controller). QEMU runs with `-snapshot`, so `disk.img` is never modified. The serial console goes to a log file and
 the QEMU monitor is on a Unix socket. The test types commands with the
 monitor's `sendkey`, exactly like keyboard input, waits for the next
 prompt in the serial log, and checks the output. It answers
 `-- more --` prompts with a space. The tests cover:
 - boot, the boot mode the kernel reports, the UEFI framebuffer and
   memory map, AHCI detection and the FAT32 mount
+- keyboard detection: a missing PS/2 controller or a missing xHCI
+  controller is noticed without hanging, and the USB keyboard is
+  enumerated
+- typing every symbol key, shifted and unshifted, which checks the USB
+  and PS/2 keymaps
 - that the firmware didn't write `NvVars` to the disk, and that
   `/EFI/BOOT/BOOTX64.EFI` is in place
 - `ls`, `cat`, `type`, `cd`, `pwd`
@@ -576,6 +693,10 @@ doesn't support.
   `disk.img`. The OVMF files are found automatically; set `OVMF_CODE` and
   `OVMF_VARS` to override.
 - **BIOS boots** use `qemu-system-i386` with SeaBIOS.
+- **Keyboards:** `KEYBOARD=both` (the default) adds a `qemu-xhci`
+  controller with a `usb-kbd` next to the normal PS/2 keyboard.
+  `KEYBOARD=usb` also removes the 8042 (`-machine q35,i8042=off`).
+  `KEYBOARD=ps2` has no USB at all.
 
 ## Limitations
 
@@ -583,9 +704,11 @@ doesn't support.
   for 32-bit UEFI), and the loader isn't signed, so Secure Boot must be
   off. The framebuffer must be 32 bpp and below 4 GB, otherwise only the
   serial console works.
-- The keyboard driver is PS/2 only. QEMU and most BIOS machines emulate
-  PS/2, but many UEFI-only PCs have just USB keyboards. On those, use the
-  serial console for output; there is no input.
+- USB: xHCI controllers only (no EHCI/UHCI/OHCI), keyboards plugged
+  into a root port only (no hubs, so not behind a hub built into a
+  monitor or the board), boot protocol only, the first keyboard only, no
+  key repeat for held keys, and no keyboard LEDs. Other USB devices are
+  given an address and then ignored.
 - Real hardware must have the SATA controller in AHCI mode.
 - FAT32 is read-only, sectors must be 512 bytes, and only the first FAT32
   partition is used.

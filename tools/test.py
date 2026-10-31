@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-GazOS end-to-end test: boot disk.img in QEMU (via UEFI and via legacy
-BIOS), type shell commands, and check the output.
+GazOS end-to-end test: boot disk.img in QEMU, type shell commands, and
+check the output. Runs every combination of firmware (UEFI, legacy BIOS)
+and keyboard (USB keyboard on xHCI with no PS/2 controller at all; PS/2
+keyboard with no USB).
 
 The kernel mirrors all console output to COM1; QEMU writes that to a log
 file which this script reads. Keystrokes are sent with the QEMU monitor's
 "sendkey" command, exactly as if typed on the PS/2 keyboard. The disk is
 opened with -snapshot, so tests never modify disk.img.
 
-usage: tools/test.py [--firmware uefi|bios|all] [--disk disk.img] [--src DIR]
-                     [--headless] [--keep]
+usage: tools/test.py [--firmware uefi|bios|all] [--keyboard usb|ps2|all]
+                     [--disk disk.img] [--src DIR] [--headless] [--keep]
 """
 
 import argparse
@@ -26,23 +28,32 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROMPT = "GazOS] "
 MORE = "-- more (any key) --"
 
-KEYS = {" ": "spc", "/": "slash", ".": "dot", "-": "minus", "_": "shift-minus",
-        "\n": "ret", ",": "comma", "=": "equal"}
+# characters -> QEMU key names (US layout)
+KEYS = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", "[": "bracket_left",
+        "]": "bracket_right", "\\": "backslash", ";": "semicolon",
+        "'": "apostrophe", "`": "grave_accent", ",": "comma", ".": "dot",
+        "/": "slash"}
+SHIFTED = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7",
+           "*": "8", "(": "9", ")": "0", "_": "minus", "+": "equal",
+           "{": "bracket_left", "}": "bracket_right", "|": "backslash",
+           ":": "semicolon", '"': "apostrophe", "~": "grave_accent",
+           "<": "comma", ">": "dot", "?": "slash"}
 
 
 class GazOS:
-    def __init__(self, mode, disk, headless, workdir):
-        self.log_path = os.path.join(workdir, f"serial-{mode}.log")
-        self.mon_path = os.path.join(workdir, f"monitor-{mode}.sock")
+    def __init__(self, mode, keyboard, disk, headless, workdir):
+        self.log_path = os.path.join(workdir, f"serial-{mode}-{keyboard}.log")
+        self.mon_path = os.path.join(workdir, f"monitor-{mode}-{keyboard}.sock")
         # same machine/firmware setup as ./run.sh (private OVMF vars copy)
         base = subprocess.run(
             [os.path.join(HERE, "tools", "qemu-args.sh"), mode, disk,
              os.path.join(workdir, "ovmf_vars.fd")],
-            check=True, capture_output=True, text=True).stdout.split()
+            check=True, capture_output=True, text=True,
+            env=dict(os.environ, KEYBOARD=keyboard)).stdout.split()
         cmd = base + ["-snapshot",
                       "-serial", f"file:{self.log_path}",
                       "-monitor", f"unix:{self.mon_path},server,nowait"]
-        cmd[cmd.index("-name") + 1] = f"GazOS-test-{mode}"
+        cmd[cmd.index("-name") + 1] = f"GazOS-test-{mode}-{keyboard}"
         if headless:
             cmd += ["-display", "none"]
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
@@ -71,6 +82,8 @@ class GazOS:
         for ch in text:
             if ch in KEYS:
                 self.key(KEYS[ch])
+            elif ch in SHIFTED:
+                self.key("shift-" + SHIFTED[ch])
             elif ch.isupper():
                 self.key("shift-" + ch.lower())
             elif ch.isalnum():
@@ -113,11 +126,11 @@ class GazOS:
             self.proc.kill()
 
 
-def run_tests(mode, args, workdir):
-    """Boot once in 'mode' and run every test. Returns the failure count."""
+def run_tests(mode, keyboard, args, workdir):
+    """Boot once and run every test. Returns the failure count."""
     failures = 0
-    print(f"=== booting via {mode.upper()} ===")
-    os_ = GazOS(mode, os.path.abspath(args.disk), args.headless, workdir)
+    print(f"=== booting via {mode.upper()}, {keyboard.upper()} keyboard ===")
+    os_ = GazOS(mode, keyboard, os.path.abspath(args.disk), args.headless, workdir)
 
     def check(name, ok, detail=""):
         nonlocal failures
@@ -151,6 +164,13 @@ def run_tests(mode, args, workdir):
         if mode == "uefi":
             check("UEFI framebuffer console", "framebuffer" in boot, boot)
             check("memory size from the UEFI memory map", "Mem.Total = " in boot, boot)
+        if keyboard == "usb":
+            check("no PS/2 controller detected (and no hang)",
+                  "No PS/2 controller" in boot, boot)
+            check("xHCI controller found", "Initialising USB (xHCI)... controller" in boot, boot)
+            check("USB keyboard enumerated", "USB keyboard ready" in boot, boot)
+        else:
+            check("no xHCI controller (and no hang)", "no xHCI controller" in boot, boot)
         check("AHCI finds the SATA disk", "SATA disk on port" in boot, boot)
         check("FAT32 volume mounted", 'volume "GAZOS"' in boot, boot)
 
@@ -197,6 +217,9 @@ def run_tests(mode, args, workdir):
         expect("cat /no/such/file", "not found", name="missing file reports an error")
         expect("cd help.txt", "no such directory", name="cd into a file fails")
         expect("frobnicate", "unknown command", name="unknown command")
+        symbols = "x!@#$%^&*()_+{}|:\"<>?-=[]\\;',./`~"
+        expect(symbols, "unknown command: " + symbols,
+               name="every shifted/unshifted symbol key types correctly")
         expect("disk", "QEMU HARDDISK", "FAT32 at LBA 2048", name="disk info")
     finally:
         os_.close()
@@ -208,6 +231,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--firmware", choices=["uefi", "bios", "all"], default="all",
                     help="boot mode(s) to test (default: all)")
+    ap.add_argument("--keyboard", choices=["usb", "ps2", "all"], default="all",
+                    help="keyboard(s) to test with (default: all)")
     ap.add_argument("--disk", default=os.path.join(HERE, "disk.img"))
     ap.add_argument("--src", default=HERE, help="source dir (for /src checks)")
     ap.add_argument("--headless", action="store_true", help="no QEMU window")
@@ -218,15 +243,18 @@ def main():
         sys.exit(f"{args.disk} not found: run ./build.sh first")
 
     modes = ["uefi", "bios"] if args.firmware == "all" else [args.firmware]
+    keyboards = ["usb", "ps2"] if args.keyboard == "all" else [args.keyboard]
     workdir = tempfile.mkdtemp(prefix="gazos-test-")
     results = {}
     for mode in modes:
-        results[mode] = run_tests(mode, args, workdir)
-        print()
+        for keyboard in keyboards:
+            results[(mode, keyboard)] = run_tests(mode, keyboard, args, workdir)
+            print()
 
     failed = sum(results.values())
-    for mode, n in results.items():
-        print(f"{mode.upper():5} {'all tests passed' if not n else f'{n} test(s) FAILED'}")
+    for (mode, keyboard), n in results.items():
+        label = f"{mode.upper()} + {keyboard.upper()}"
+        print(f"{label:11} {'all tests passed' if not n else f'{n} test(s) FAILED'}")
     if args.keep or failed:
         print(f"serial logs: {workdir}")
     else:
